@@ -1,0 +1,489 @@
+// DailySpark Database Schema
+// This file grows one feature at a time, in step with the build order.
+// Currently covers: Users & Authentication (Steps 1-3), Lessons/Bookmarks/Likes (Step 5).
+// Future steps will add: Quiz, Question, Attempt, Streak, Badge, UserBadge,
+// Comment, Follow, Notification, Subscription, etc.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum AuthProvider {
+  LOCAL
+  GOOGLE
+}
+
+model User {
+  id                String        @id @default(uuid())
+  email             String        @unique
+  emailVerified     Boolean       @default(false)
+  passwordHash      String? // null for OAuth-only accounts
+  name              String
+  avatarUrl         String?
+  bio               String?
+  role              Role          @default(USER)
+  authProvider      AuthProvider  @default(LOCAL)
+  googleId          String?       @unique
+  preferredLanguage String        @default("en")
+  interests         String[]      @default([])
+
+  isPremium         Boolean       @default(false)
+  isActive          Boolean       @default(true)
+
+  totalXp          Int       @default(0)
+  level            Int       @default(1)
+  currentStreak    Int       @default(0)
+  longestStreak    Int       @default(0)
+  lastActivityDate DateTime?
+
+  dailyAiRequestCount Int       @default(0)
+  dailyAiRequestDate  DateTime?
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  refreshTokens        RefreshToken[]
+  emailVerificationTokens EmailVerificationToken[]
+  passwordResetTokens  PasswordResetToken[]
+  authoredLessons      Lesson[]                 @relation("LessonAuthor")
+  bookmarks            Bookmark[]
+  likes                Like[]
+  quizAttempts         QuizAttempt[]
+  badges               UserBadge[]
+  xpEvents             XpEvent[]
+  comments             Comment[]
+  commentLikes         CommentLike[]
+  following            Follow[]              @relation("Follower")
+  followers            Follow[]              @relation("Following")
+  reports              Report[]
+  notifications        Notification[]        @relation("NotificationRecipient")
+  triggeredNotifications Notification[]      @relation("NotificationActor")
+  deviceTokens         DeviceToken[]
+  subscription         Subscription?
+  auditLogs            AuditLog[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// One row per issued refresh token, so individual sessions/devices
+// can be revoked (logout on one device, or "logout everywhere").
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique // stored hashed, never plaintext
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userAgent String?
+  ipAddress String?
+  revoked   Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(uuid())
+  token     String   @unique // stored hashed
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("email_verification_tokens")
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  token     String   @unique // stored hashed
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+model Lesson {
+  id      String @id @default(uuid())
+  slug    String @unique
+  title   String
+  summary String
+
+  // Full lesson body, ~5-minute read, stored as Markdown.
+  content                 String
+  estimatedReadingMinutes Int    @default(5)
+
+  imageUrl String?
+  audioUrl String? // narration, uploaded/hosted via Cloudinary or external CDN
+
+  // Validated against the shared CATEGORIES list at the application layer
+  // (Prisma doesn't enforce this since categories may grow without a migration).
+  category String
+
+  tags       String[]   @default([])
+  difficulty Difficulty @default(BEGINNER)
+  references String[]   @default([]) // citation URLs / source titles
+
+  authorId   String?
+  author     User?   @relation("LessonAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  authorName String? // fallback display name when no linked User is set
+
+  isPublished Boolean   @default(true)
+  publishedAt DateTime?
+
+  likesCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookmarks Bookmark[]
+  likes     Like[]
+  quiz      Quiz?
+  comments  Comment[]
+
+  @@index([category])
+  @@index([slug])
+  @@index([isPublished])
+  @@map("lessons")
+}
+
+model Bookmark {
+  id       String @id @default(uuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, lessonId])
+  @@index([userId])
+  @@map("bookmarks")
+}
+
+model Like {
+  id       String @id @default(uuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId String
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, lessonId])
+  @@index([lessonId])
+  @@map("likes")
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  TRUE_FALSE
+  FILL_BLANK
+  IMAGE
+}
+
+model Quiz {
+  id       String @id @default(uuid())
+  lessonId String @unique
+  lesson   Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  title            String
+  timeLimitSeconds Int? // null = untimed
+  xpReward         Int  @default(20)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  questions Question[]
+  attempts  QuizAttempt[]
+
+  @@map("quizzes")
+}
+
+model Question {
+  id     String @id @default(uuid())
+  quizId String
+  quiz   Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  type        QuestionType
+  prompt      String
+  imageUrl    String? // used by IMAGE-type questions
+  explanation String // shown to the learner after they answer
+  order       Int          @default(0)
+
+  // Used by FILL_BLANK only — accepted answers, matched case-insensitively.
+  correctFillAnswers String[] @default([])
+
+  options QuestionOption[]
+
+  @@index([quizId])
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         String   @id @default(uuid())
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  text      String
+  isCorrect Boolean @default(false)
+  order     Int     @default(0)
+
+  @@index([questionId])
+  @@map("question_options")
+}
+
+model QuizAttempt {
+  id     String @id @default(uuid())
+  quizId String
+  quiz   Quiz   @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  score            Int
+  totalQuestions   Int
+  xpEarned         Int
+  timeTakenSeconds Int?
+  // Per-question submitted answers, for review/history — not used for re-scoring.
+  answers          Json
+
+  completedAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([quizId])
+  @@map("quiz_attempts")
+}
+
+model Badge {
+  id          String @id @default(uuid())
+  code        String @unique
+  name        String
+  description String
+  icon        String // emoji glyph, keeps this lightweight without needing image upload
+
+  createdAt DateTime @default(now())
+
+  userBadges UserBadge[]
+
+  @@map("badges")
+}
+
+model UserBadge {
+  id      String @id @default(uuid())
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badgeId String
+  badge   Badge  @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  earnedAt DateTime @default(now())
+
+  @@unique([userId, badgeId])
+  @@index([userId])
+  @@map("user_badges")
+}
+
+model XpEvent {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  amount      Int
+  reason      String // e.g. "QUIZ_COMPLETED", "STREAK_BONUS"
+  referenceId String? // e.g. the quizId or lessonId that triggered this event
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("xp_events")
+}
+
+enum ReportTargetType {
+  LESSON
+  COMMENT
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  DISMISSED
+}
+
+enum NotificationType {
+  NEW_FOLLOWER
+  COMMENT_REPLY
+  BADGE_EARNED
+}
+
+model Comment {
+  id       String  @id @default(uuid())
+  lessonId String
+  lesson   Lesson  @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  content   String
+  parentId  String?
+  parent    Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies   Comment[] @relation("CommentReplies")
+
+  likesCount Int     @default(0)
+  isDeleted  Boolean @default(false) // soft delete so reply threads don't break
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  likes CommentLike[]
+
+  @@index([lessonId])
+  @@index([parentId])
+  @@map("comments")
+}
+
+model CommentLike {
+  id        String  @id @default(uuid())
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  commentId String
+  comment   Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([userId, commentId])
+  @@index([commentId])
+  @@map("comment_likes")
+}
+
+model Follow {
+  id          String @id @default(uuid())
+  followerId  String
+  follower    User   @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User   @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+model Report {
+  id         String           @id @default(uuid())
+  reporterId String
+  reporter   User             @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  targetType ReportTargetType
+  targetId   String
+  reason     String
+  status     ReportStatus     @default(PENDING)
+
+  createdAt DateTime @default(now())
+
+  @@index([targetType, targetId])
+  @@index([status])
+  @@map("reports")
+}
+
+model Notification {
+  id     String           @id @default(uuid())
+  userId String // recipient
+  user   User             @relation("NotificationRecipient", fields: [userId], references: [id], onDelete: Cascade)
+  type   NotificationType
+
+  actorId String? // who triggered it (e.g. the new follower)
+  actor   User?   @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  lessonId String?
+  commentId String?
+
+  message String
+  isRead  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, isRead])
+  @@map("notifications")
+}
+
+model DeviceToken {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  token    String @unique // the FCM registration token
+  platform String @default("WEB")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@map("device_tokens")
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+model Subscription {
+  id     String @id @default(uuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  stripeCustomerId     String @unique
+  stripeSubscriptionId String @unique
+  stripePriceId        String
+
+  status             SubscriptionStatus
+  currentPeriodEnd    DateTime
+  cancelAtPeriodEnd   Boolean            @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("subscriptions")
+}
+
+model AuditLog {
+  id     String  @id @default(uuid())
+  actorId String? // the admin who performed the action; null if system-triggered
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  action     String // e.g. "USER_ROLE_CHANGED", "USER_DELETED", "REPORT_STATUS_CHANGED"
+  targetType String // e.g. "User", "Report", "Lesson"
+  targetId   String
+  metadata   Json? // arbitrary before/after details for the change
+
+  createdAt DateTime @default(now())
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
